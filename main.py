@@ -15,7 +15,7 @@ from langchain.prompts import PromptTemplate
 from langchain.text_splitter import CharacterTextSplitter
 
 # from langchain.llms import OpenAI
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAI
 from pydantic import BaseModel, SecretStr
 
 # Setup Logging
@@ -92,10 +92,13 @@ def save_to_db(data: dict):
 app = FastAPI()
 
 # Model Configuration
-# llm = OpenAI(temperature=0.7, model_name="gpt-4",api_key="sk-1ZQ7J9)
+llm = ChatOpenAI(
+    temperature=0.7,
+    model="gpt-4o-mini",
+)
 
 
-llm = ChatOpenAI(api_key=SecretStr("ugyuhk"), temperature=0.7, model="gpt-4o-mini")
+# llm = ChatOpenAI( temperature=0.7, model="gpt-4o-mini")
 
 
 # Input Data Models
@@ -182,25 +185,36 @@ async def scrape_company_website(url: str) -> str:
                 links.add(link)
         return links
 
-    visited = set()
+    visited: set[str] = set()
     to_visit = {url}
     all_texts = []
+    max_pages = 5
 
-    while to_visit:
+    while to_visit and len(visited) < max_pages:
         current_url = to_visit.pop()
         if current_url in visited:
             continue
 
         page_content = await fetch_page_content(current_url)
         if page_content:
+            prompt = PromptTemplate(
+                input_variables=["text"],
+                template="The following content is the scraped webpage of a website. Extract the useful info from the page and output a summary of what it is about, including all important details :\n{text}\n",
+            )
+            chain = prompt | llm
+            page_content = chain.invoke({"text": page_content}).content
             visited.add(current_url)
             all_texts.append(page_content)
 
             new_links = await extract_links(page_content, url)
+            keywords = ["about", "company", "overview", "profile"]
+            new_links = {link for link in new_links if any(k in link for k in keywords)}
+            print("\nnew_links", new_links)
             to_visit.update(new_links - visited)
 
-        # Add delay to prevent server overload
+        await asyncio.sleep(1)
         time.sleep(1)
+    print("visited", visited)
 
     if not all_texts:
         logging.warning("No content scraped from %s", url)
@@ -208,19 +222,27 @@ async def scrape_company_website(url: str) -> str:
 
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     texts = text_splitter.split_text("\n".join(all_texts))
-    combine_chain = StuffDocumentsChain(
-        llm_chain=LLMChain(
-            llm=llm,
-            prompt=PromptTemplate(
-                input_variables=["text"],
-                template="Summarize the following content:\n{text}\n",
-            ),
-        ),
-        document_variable_name="text",
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="The following content is the scraped webpage of a website. Extract the useful info from the page and output a summary of what the company is about, including all important details about the company:\n{text}\n",
     )
-    company_info = combine_chain.run(texts)
+    chain = prompt | llm
+    # combine_chain = StuffDocumentsChain(
+    #     llm_chain=LLMChain(
+    #         llm=llm,
+    #         prompt=PromptTemplate(
+    #             input_variables=["text"],
+    #             template="Summarize the following content:\n{text}\n",
+    #         ),
+    #     ),
+    #     document_variable_name="text",
+    # )
+    # company_info = combine_chain.invoke({"text": texts})
+    company_info = chain.invoke({"text": texts})
     logging.info("Scraping completed for %s", url)
-    return company_info
+    print("\n\n\n\n\n", company_info.content)
+    # exit()
+    return str(company_info.content)
 
 
 async def generate_outputs(resume: str, job_description: str, company_info: str):
@@ -279,6 +301,7 @@ async def process_resume(data: ResumeJobData):
             job_description=data.job_description,
             company_info=company_info,
         )
+        print("\n\noutputs", outputs)
 
         result_data = {
             "resume": data.resume,
